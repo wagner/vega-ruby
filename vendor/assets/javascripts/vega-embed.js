@@ -877,6 +877,10 @@
       unescapePathComponent
     });
 
+    function getDefaultExportFromCjs (x) {
+    	return x && x.__esModule && Object.prototype.hasOwnProperty.call(x, 'default') ? x['default'] : x;
+    }
+
     // Note: This regex matches even invalid JSON strings, but since we’re
     // working on the output of `JSON.stringify` we know that only valid strings
     // are present (unless the user supplied a weird `options.indent` but in
@@ -943,6 +947,7 @@
         return string;
       }(passedObj, "", 0);
     };
+    var stringify$1 = /*@__PURE__*/getDefaultExportFromCjs(jsonStringifyPrettyCompact);
 
     var iterator;
     var hasRequiredIterator;
@@ -1237,7 +1242,7 @@
       }
       return ret;
     };
-    Yallist$1.prototype.splice = function (start, deleteCount) {
+    Yallist$1.prototype.splice = function (start, deleteCount, ...nodes) {
       if (start > this.length) {
         start = this.length - 1;
       }
@@ -1258,8 +1263,8 @@
       if (walker !== this.head && walker !== this.tail) {
         walker = walker.prev;
       }
-      for (var i = 0; i < (arguments.length <= 2 ? 0 : arguments.length - 2); i++) {
-        walker = insert(this, walker, i + 2 < 2 || arguments.length <= i + 2 ? undefined : arguments[i + 2]);
+      for (var i = 0; i < nodes.length; i++) {
+        walker = insert(this, walker, nodes[i]);
       }
       return ret;
     };
@@ -1597,22 +1602,23 @@
     };
     var lruCache = LRUCache;
 
-    // parse out just the options we care about so we always get a consistent
-    // obj with keys in a consistent order.
-    const opts = ['includePrerelease', 'loose', 'rtl'];
-    const parseOptions$1 = options => !options ? {} : typeof options !== 'object' ? {
+    // parse out just the options we care about
+    const looseOption = Object.freeze({
       loose: true
-    } : opts.filter(k => options[k]).reduce((o, k) => {
-      o[k] = true;
-      return o;
-    }, {});
+    });
+    const emptyOpts = Object.freeze({});
+    const parseOptions$1 = options => {
+      if (!options) {
+        return emptyOpts;
+      }
+      if (typeof options !== 'object') {
+        return looseOption;
+      }
+      return options;
+    };
     var parseOptions_1 = parseOptions$1;
 
-    var reExports = {};
-    var re$1 = {
-      get exports(){ return reExports; },
-      set exports(v){ reExports = v; },
-    };
+    var re$1 = {exports: {}};
 
     // Note: this is the semver.org version of the spec that it implements
     // Not necessarily the package version of this code.
@@ -1622,39 +1628,63 @@
 
     // Max safe segment length for coercion.
     const MAX_SAFE_COMPONENT_LENGTH = 16;
+
+    // Max safe length for a build identifier. The max length minus 6 characters for
+    // the shortest version with a build 0.0.0+BUILD.
+    const MAX_SAFE_BUILD_LENGTH = MAX_LENGTH$1 - 6;
+    const RELEASE_TYPES = ['major', 'premajor', 'minor', 'preminor', 'patch', 'prepatch', 'prerelease'];
     var constants = {
-      SEMVER_SPEC_VERSION,
       MAX_LENGTH: MAX_LENGTH$1,
+      MAX_SAFE_COMPONENT_LENGTH,
+      MAX_SAFE_BUILD_LENGTH,
       MAX_SAFE_INTEGER: MAX_SAFE_INTEGER$1,
-      MAX_SAFE_COMPONENT_LENGTH
+      RELEASE_TYPES,
+      SEMVER_SPEC_VERSION,
+      FLAG_INCLUDE_PRERELEASE: 0b001,
+      FLAG_LOOSE: 0b010
     };
 
-    const debug$1 = typeof process === 'object' && process.env && process.env.NODE_DEBUG && /\bsemver\b/i.test(process.env.NODE_DEBUG) ? function () {
-      for (var _len = arguments.length, args = new Array(_len), _key = 0; _key < _len; _key++) {
-        args[_key] = arguments[_key];
-      }
-      return console.error('SEMVER', ...args);
-    } : () => {};
+    const debug$1 = typeof process === 'object' && process.env && process.env.NODE_DEBUG && /\bsemver\b/i.test(process.env.NODE_DEBUG) ? (...args) => console.error('SEMVER', ...args) : () => {};
     var debug_1 = debug$1;
 
     (function (module, exports) {
       const {
-        MAX_SAFE_COMPONENT_LENGTH
+        MAX_SAFE_COMPONENT_LENGTH,
+        MAX_SAFE_BUILD_LENGTH,
+        MAX_LENGTH
       } = constants;
       const debug = debug_1;
       exports = module.exports = {};
 
       // The actual regexps go on exports.re
       const re = exports.re = [];
+      const safeRe = exports.safeRe = [];
       const src = exports.src = [];
       const t = exports.t = {};
       let R = 0;
+      const LETTERDASHNUMBER = '[a-zA-Z0-9-]';
+
+      // Replace some greedy regex tokens to prevent regex dos issues. These regex are
+      // used internally via the safeRe object since all inputs in this library get
+      // normalized first to trim and collapse all extra whitespace. The original
+      // regexes are exported for userland consumption and lower level usage. A
+      // future breaking change could export the safer regex only with a note that
+      // all input should have extra whitespace removed.
+      const safeRegexReplacements = [['\\s', 1], ['\\d', MAX_LENGTH], [LETTERDASHNUMBER, MAX_SAFE_BUILD_LENGTH]];
+      const makeSafeRegex = value => {
+        for (const [token, max] of safeRegexReplacements) {
+          value = value.split(`${token}*`).join(`${token}{0,${max}}`).split(`${token}+`).join(`${token}{1,${max}}`);
+        }
+        return value;
+      };
       const createToken = (name, value, isGlobal) => {
+        const safe = makeSafeRegex(value);
         const index = R++;
         debug(name, index, value);
         t[name] = index;
         src[index] = value;
         re[index] = new RegExp(value, isGlobal ? 'g' : undefined);
+        safeRe[index] = new RegExp(safe, isGlobal ? 'g' : undefined);
       };
 
       // The following Regular Expressions can be used for tokenizing,
@@ -1664,13 +1694,13 @@
       // A single `0`, or a non-zero digit followed by zero or more digits.
 
       createToken('NUMERICIDENTIFIER', '0|[1-9]\\d*');
-      createToken('NUMERICIDENTIFIERLOOSE', '[0-9]+');
+      createToken('NUMERICIDENTIFIERLOOSE', '\\d+');
 
       // ## Non-numeric Identifier
       // Zero or more digits, followed by a letter or hyphen, and then zero or
       // more letters, digits, or hyphens.
 
-      createToken('NONNUMERICIDENTIFIER', '\\d*[a-zA-Z-][a-zA-Z0-9-]*');
+      createToken('NONNUMERICIDENTIFIER', `\\d*[a-zA-Z-]${LETTERDASHNUMBER}*`);
 
       // ## Main Version
       // Three dot-separated numeric identifiers.
@@ -1694,7 +1724,7 @@
       // ## Build Metadata Identifier
       // Any combination of digits, letters, or hyphens.
 
-      createToken('BUILDIDENTIFIER', '[0-9A-Za-z-]+');
+      createToken('BUILDIDENTIFIER', `${LETTERDASHNUMBER}+`);
 
       // ## Build Metadata
       // Plus sign, followed by one or more period-separated build metadata
@@ -1773,7 +1803,8 @@
       // >=0.0.0 is like a star
       createToken('GTE0', '^\\s*>=\\s*0\\.0\\.0\\s*$');
       createToken('GTE0PRE', '^\\s*>=\\s*0\\.0\\.0-0\\s*$');
-    })(re$1, reExports);
+    })(re$1, re$1.exports);
+    var reExports = re$1.exports;
 
     const numeric = /^[0-9]+$/;
     const compareIdentifiers$1 = (a, b) => {
@@ -1797,7 +1828,7 @@
       MAX_SAFE_INTEGER
     } = constants;
     const {
-      re,
+      safeRe: re,
       t
     } = reExports;
     const parseOptions = parseOptions_1;
@@ -1814,7 +1845,7 @@
             version = version.version;
           }
         } else if (typeof version !== 'string') {
-          throw new TypeError(`Invalid Version: ${version}`);
+          throw new TypeError(`Invalid version. Must be a string. Got type "${typeof version}".`);
         }
         if (version.length > MAX_LENGTH) {
           throw new TypeError(`version is longer than ${MAX_LENGTH} characters`);
@@ -1947,36 +1978,36 @@
 
       // preminor will bump the version up to the next minor release, and immediately
       // down to pre-release. premajor and prepatch work the same way.
-      inc(release, identifier) {
+      inc(release, identifier, identifierBase) {
         switch (release) {
           case 'premajor':
             this.prerelease.length = 0;
             this.patch = 0;
             this.minor = 0;
             this.major++;
-            this.inc('pre', identifier);
+            this.inc('pre', identifier, identifierBase);
             break;
           case 'preminor':
             this.prerelease.length = 0;
             this.patch = 0;
             this.minor++;
-            this.inc('pre', identifier);
+            this.inc('pre', identifier, identifierBase);
             break;
           case 'prepatch':
             // If this is already a prerelease, it will bump to the next version
             // drop any prereleases that might already exist, since they are not
             // relevant at this point.
             this.prerelease.length = 0;
-            this.inc('patch', identifier);
-            this.inc('pre', identifier);
+            this.inc('patch', identifier, identifierBase);
+            this.inc('pre', identifier, identifierBase);
             break;
           // If the input is a non-prerelease version, this acts the same as
           // prepatch.
           case 'prerelease':
             if (this.prerelease.length === 0) {
-              this.inc('patch', identifier);
+              this.inc('patch', identifier, identifierBase);
             }
-            this.inc('pre', identifier);
+            this.inc('pre', identifier, identifierBase);
             break;
           case 'major':
             // If this is a pre-major version, bump up to the same major version.
@@ -2014,38 +2045,53 @@
           // This probably shouldn't be used publicly.
           // 1.0.0 'pre' would become 1.0.0-0 which is the wrong direction.
           case 'pre':
-            if (this.prerelease.length === 0) {
-              this.prerelease = [0];
-            } else {
-              let i = this.prerelease.length;
-              while (--i >= 0) {
-                if (typeof this.prerelease[i] === 'number') {
-                  this.prerelease[i]++;
-                  i = -2;
-                }
+            {
+              const base = Number(identifierBase) ? 1 : 0;
+              if (!identifier && identifierBase === false) {
+                throw new Error('invalid increment argument: identifier is empty');
               }
-              if (i === -1) {
-                // didn't increment anything
-                this.prerelease.push(0);
-              }
-            }
-            if (identifier) {
-              // 1.2.0-beta.1 bumps to 1.2.0-beta.2,
-              // 1.2.0-beta.fooblz or 1.2.0-beta bumps to 1.2.0-beta.0
-              if (compareIdentifiers(this.prerelease[0], identifier) === 0) {
-                if (isNaN(this.prerelease[1])) {
-                  this.prerelease = [identifier, 0];
-                }
+              if (this.prerelease.length === 0) {
+                this.prerelease = [base];
               } else {
-                this.prerelease = [identifier, 0];
+                let i = this.prerelease.length;
+                while (--i >= 0) {
+                  if (typeof this.prerelease[i] === 'number') {
+                    this.prerelease[i]++;
+                    i = -2;
+                  }
+                }
+                if (i === -1) {
+                  // didn't increment anything
+                  if (identifier === this.prerelease.join('.') && identifierBase === false) {
+                    throw new Error('invalid increment argument: identifier already exists');
+                  }
+                  this.prerelease.push(base);
+                }
               }
+              if (identifier) {
+                // 1.2.0-beta.1 bumps to 1.2.0-beta.2,
+                // 1.2.0-beta.fooblz or 1.2.0-beta bumps to 1.2.0-beta.0
+                let prerelease = [identifier, base];
+                if (identifierBase === false) {
+                  prerelease = [identifier];
+                }
+                if (compareIdentifiers(this.prerelease[0], identifier) === 0) {
+                  if (isNaN(this.prerelease[1])) {
+                    this.prerelease = prerelease;
+                  }
+                } else {
+                  this.prerelease = prerelease;
+                }
+              }
+              break;
             }
-            break;
           default:
             throw new Error(`invalid increment argument: ${release}`);
         }
-        this.format();
-        this.raw = this.version;
+        this.raw = this.format();
+        if (this.build.length) {
+          this.raw += `+${this.build.join('.')}`;
+        }
         return this;
       }
     };
@@ -2143,6 +2189,7 @@
               comp = comp.value;
             }
           }
+          comp = comp.trim().split(/\s+/).join(' ');
           debug('comparator', comp, options);
           this.options = options;
           this.loose = !!options.loose;
@@ -2193,12 +2240,6 @@
           if (!(comp instanceof Comparator)) {
             throw new TypeError('a Comparator is required');
           }
-          if (!options || typeof options !== 'object') {
-            options = {
-              loose: !!options,
-              includePrerelease: false
-            };
-          }
           if (this.operator === '') {
             if (this.value === '') {
               return true;
@@ -2210,19 +2251,43 @@
             }
             return new Range(this.value, options).test(comp.semver);
           }
-          const sameDirectionIncreasing = (this.operator === '>=' || this.operator === '>') && (comp.operator === '>=' || comp.operator === '>');
-          const sameDirectionDecreasing = (this.operator === '<=' || this.operator === '<') && (comp.operator === '<=' || comp.operator === '<');
-          const sameSemVer = this.semver.version === comp.semver.version;
-          const differentDirectionsInclusive = (this.operator === '>=' || this.operator === '<=') && (comp.operator === '>=' || comp.operator === '<=');
-          const oppositeDirectionsLessThan = cmp(this.semver, '<', comp.semver, options) && (this.operator === '>=' || this.operator === '>') && (comp.operator === '<=' || comp.operator === '<');
-          const oppositeDirectionsGreaterThan = cmp(this.semver, '>', comp.semver, options) && (this.operator === '<=' || this.operator === '<') && (comp.operator === '>=' || comp.operator === '>');
-          return sameDirectionIncreasing || sameDirectionDecreasing || sameSemVer && differentDirectionsInclusive || oppositeDirectionsLessThan || oppositeDirectionsGreaterThan;
+          options = parseOptions(options);
+
+          // Special cases where nothing can possibly be lower
+          if (options.includePrerelease && (this.value === '<0.0.0-0' || comp.value === '<0.0.0-0')) {
+            return false;
+          }
+          if (!options.includePrerelease && (this.value.startsWith('<0.0.0') || comp.value.startsWith('<0.0.0'))) {
+            return false;
+          }
+
+          // Same direction increasing (> or >=)
+          if (this.operator.startsWith('>') && comp.operator.startsWith('>')) {
+            return true;
+          }
+          // Same direction decreasing (< or <=)
+          if (this.operator.startsWith('<') && comp.operator.startsWith('<')) {
+            return true;
+          }
+          // same SemVer and both sides are inclusive (<= or >=)
+          if (this.semver.version === comp.semver.version && this.operator.includes('=') && comp.operator.includes('=')) {
+            return true;
+          }
+          // opposite directions less than
+          if (cmp(this.semver, '<', comp.semver, options) && this.operator.startsWith('>') && comp.operator.startsWith('<')) {
+            return true;
+          }
+          // opposite directions greater than
+          if (cmp(this.semver, '>', comp.semver, options) && this.operator.startsWith('<') && comp.operator.startsWith('>')) {
+            return true;
+          }
+          return false;
         }
       }
       comparator = Comparator;
       const parseOptions = parseOptions_1;
       const {
-        re,
+        safeRe: re,
         t
       } = reExports;
       const cmp = cmp_1;
@@ -2259,9 +2324,13 @@
           this.loose = !!options.loose;
           this.includePrerelease = !!options.includePrerelease;
 
-          // First, split based on boolean or ||
-          this.raw = range;
-          this.set = range.split('||')
+          // First reduce all whitespace as much as possible so we do not have to rely
+          // on potentially slow regexes like \s*. This is then stored and used for
+          // future error messages as well.
+          this.raw = range.trim().split(/\s+/).join(' ');
+
+          // First, split on ||
+          this.set = this.raw.split('||')
           // map the range to a 2d array of comparators
           .map(r => this.parseRange(r.trim()))
           // throw out any comparator lists that are empty
@@ -2269,7 +2338,7 @@
           // in loose mode, but will still throw if the WHOLE range is invalid.
           .filter(c => c.length);
           if (!this.set.length) {
-            throw new TypeError(`Invalid SemVer Range: ${range}`);
+            throw new TypeError(`Invalid SemVer Range: ${this.raw}`);
           }
 
           // if we have any that are not the null set, throw out null sets.
@@ -2292,21 +2361,17 @@
           this.format();
         }
         format() {
-          this.range = this.set.map(comps => {
-            return comps.join(' ').trim();
-          }).join('||').trim();
+          this.range = this.set.map(comps => comps.join(' ').trim()).join('||').trim();
           return this.range;
         }
         toString() {
           return this.range;
         }
         parseRange(range) {
-          range = range.trim();
-
           // memoize range parsing for performance.
           // this is a very hot path, and fully deterministic.
-          const memoOpts = Object.keys(this.options).join(',');
-          const memoKey = `parseRange:${memoOpts}:${range}`;
+          const memoOpts = (this.options.includePrerelease && FLAG_INCLUDE_PRERELEASE) | (this.options.loose && FLAG_LOOSE);
+          const memoKey = memoOpts + ':' + range;
           const cached = cache.get(memoKey);
           if (cached) {
             return cached;
@@ -2316,18 +2381,18 @@
           const hr = loose ? re[t.HYPHENRANGELOOSE] : re[t.HYPHENRANGE];
           range = range.replace(hr, hyphenReplace(this.options.includePrerelease));
           debug('hyphen replace', range);
+
           // `> 1.2.3 < 1.2.5` => `>1.2.3 <1.2.5`
           range = range.replace(re[t.COMPARATORTRIM], comparatorTrimReplace);
           debug('comparator trim', range);
 
           // `~ 1.2.3` => `~1.2.3`
           range = range.replace(re[t.TILDETRIM], tildeTrimReplace);
+          debug('tilde trim', range);
 
           // `^ 1.2.3` => `^1.2.3`
           range = range.replace(re[t.CARETTRIM], caretTrimReplace);
-
-          // normalize spaces
-          range = range.split(/\s+/).join(' ');
+          debug('caret trim', range);
 
           // At this point, the range is completely trimmed and
           // ready to be split into comparators.
@@ -2407,12 +2472,16 @@
       const debug = debug_1;
       const SemVer = semver;
       const {
-        re,
+        safeRe: re,
         t,
         comparatorTrimReplace,
         tildeTrimReplace,
         caretTrimReplace
       } = reExports;
+      const {
+        FLAG_INCLUDE_PRERELEASE,
+        FLAG_LOOSE
+      } = constants;
       const isNullSet = c => c.value === '<0.0.0-0';
       const isAny = c => c.value === '';
 
@@ -2455,9 +2524,9 @@
       // ~1.2.3, ~>1.2.3 --> >=1.2.3 <1.3.0-0
       // ~1.2.0, ~>1.2.0 --> >=1.2.0 <1.3.0-0
       // ~0.0.1 --> >=0.0.1 <0.1.0-0
-      const replaceTildes = (comp, options) => comp.trim().split(/\s+/).map(c => {
-        return replaceTilde(c, options);
-      }).join(' ');
+      const replaceTildes = (comp, options) => {
+        return comp.trim().split(/\s+/).map(c => replaceTilde(c, options)).join(' ');
+      };
       const replaceTilde = (comp, options) => {
         const r = options.loose ? re[t.TILDELOOSE] : re[t.TILDE];
         return comp.replace(r, (_, M, m, p, pr) => {
@@ -2490,9 +2559,9 @@
       // ^1.2.0 --> >=1.2.0 <2.0.0-0
       // ^0.0.1 --> >=0.0.1 <0.0.2-0
       // ^0.1.0 --> >=0.1.0 <0.2.0-0
-      const replaceCarets = (comp, options) => comp.trim().split(/\s+/).map(c => {
-        return replaceCaret(c, options);
-      }).join(' ');
+      const replaceCarets = (comp, options) => {
+        return comp.trim().split(/\s+/).map(c => replaceCaret(c, options)).join(' ');
+      };
       const replaceCaret = (comp, options) => {
         debug('caret', comp, options);
         const r = options.loose ? re[t.CARETLOOSE] : re[t.CARET];
@@ -2539,9 +2608,7 @@
       };
       const replaceXRanges = (comp, options) => {
         debug('replaceXRanges', comp, options);
-        return comp.split(/\s+/).map(c => {
-          return replaceXRange(c, options);
-        }).join(' ');
+        return comp.split(/\s+/).map(c => replaceXRange(c, options)).join(' ');
       };
       const replaceXRange = (comp, options) => {
         comp = comp.trim();
@@ -2697,6 +2764,7 @@
       return range.test(version);
     };
     var satisfies_1 = satisfies;
+    var satisfies$1 = /*@__PURE__*/getDefaultExportFromCjs(satisfies_1);
 
     function adjustSpatial(item, encode, swap) {
       let t;
@@ -2857,6 +2925,8 @@
       test: (r, t) => RegExp(r).test(t)
     };
     const EventFunctions = ['view', 'item', 'group', 'xy', 'x', 'y'];
+    const DisallowedMethods = new Set([Function, eval, setTimeout, setInterval]);
+    if (typeof setImmediate === 'function') DisallowedMethods.add(setImmediate);
     const Visitors = {
       Literal: ($, n) => n.value,
       Identifier: ($, n) => {
@@ -2869,17 +2939,24 @@
         if (d) $.memberDepth += 1;
         const p = $(n.property);
         if (d) $.memberDepth -= 1;
+        if (DisallowedMethods.has(o[p])) {
+          // eslint-disable-next-line no-console
+          console.error(`Prevented interpretation of member "${p}" which could lead to insecure code execution`);
+          return;
+        }
         return o[p];
       },
       CallExpression: ($, n) => {
         const args = n.arguments;
-        let name = n.callee.name; // handle special internal functions used by encoders
-        // re-route to corresponding standard function
+        let name = n.callee.name;
 
+        // handle special internal functions used by encoders
+        // re-route to corresponding standard function
         if (name.startsWith('_')) {
           name = name.slice(1);
-        } // special case "if" due to conditional evaluation of branches
+        }
 
+        // special case "if" due to conditional evaluation of branches
         return name === 'if' ? $(args[0]) ? $(args[1]) : $(args[2]) : ($.fn[name] || Functions[name]).apply($.fn, args.map($));
       },
       ArrayExpression: ($, n) => n.elements.map($),
@@ -2891,7 +2968,12 @@
         $.memberDepth += 1;
         const k = $(p.key);
         $.memberDepth -= 1;
-        o[k] = $(p.value);
+        if (DisallowedMethods.has($(p.value))) {
+          // eslint-disable-next-line no-console
+          console.error(`Prevented interpretation of property "${k}" which could lead to insecure code execution`);
+        } else {
+          o[k] = $(p.value);
+        }
         return o;
       }, {})
     };
@@ -2902,8 +2984,9 @@
       $.params = params;
       $.datum = datum;
       $.event = event;
-      $.item = item; // route event functions to annotated vega event context
+      $.item = item;
 
+      // route event functions to annotated vega event context
       EventFunctions.forEach(f => $.fn[f] = function () {
         return event.vega[f](...arguments);
       });
@@ -2983,7 +3066,7 @@
     }
 
     var name$1 = "vega-themes";
-    var version$1$1 = "2.12.1";
+    var version$1$1 = "2.14.0";
     var description$1 = "Themes for stylized Vega and Vega-Lite visualizations.";
     var keywords$1 = ["vega", "vega-lite", "themes", "style"];
     var license$1 = "BSD-3-Clause";
@@ -3024,28 +3107,39 @@
       preversion: "yarn lint",
       serve: "browser-sync start -s -f build examples --serveStatic examples",
       start: "yarn build && concurrently --kill-others -n Server,Rollup 'yarn serve' 'rollup -c -w'",
-      prepare: "beemo create-config",
-      eslintbase: "beemo eslint .",
-      format: "yarn eslintbase --fix",
-      lint: "yarn eslintbase",
+      format: "eslint . --fix",
+      lint: "eslint .",
       release: "release-it"
     };
     var devDependencies$1 = {
-      "@release-it/conventional-changelog": "^5.1.1",
+      "@babel/core": "^7.22.9",
+      "@babel/plugin-proposal-async-generator-functions": "^7.20.7",
+      "@babel/plugin-proposal-json-strings": "^7.18.6",
+      "@babel/plugin-proposal-object-rest-spread": "^7.20.7",
+      "@babel/plugin-proposal-optional-catch-binding": "^7.18.6",
+      "@babel/plugin-transform-runtime": "^7.22.9",
+      "@babel/preset-env": "^7.22.9",
+      "@babel/preset-typescript": "^7.22.5",
+      "@release-it/conventional-changelog": "^7.0.0",
       "@rollup/plugin-json": "^6.0.0",
-      "@rollup/plugin-node-resolve": "^15.0.1",
-      "@rollup/plugin-terser": "^0.4.0",
-      "browser-sync": "^2.27.10",
-      concurrently: "^7.3.0",
+      "@rollup/plugin-node-resolve": "^15.1.0",
+      "@rollup/plugin-terser": "^0.4.3",
+      "@typescript-eslint/eslint-plugin": "^6.0.0",
+      "@typescript-eslint/parser": "^6.0.0",
+      "browser-sync": "^2.29.3",
+      concurrently: "^8.2.0",
+      eslint: "^8.45.0",
+      "eslint-config-prettier": "^8.8.0",
+      "eslint-plugin-prettier": "^5.0.0",
       "gh-pages": "^5.0.0",
-      "release-it": "^15.6.0",
+      prettier: "^3.0.0",
+      "release-it": "^16.1.0",
+      rollup: "^3.26.2",
       "rollup-plugin-bundle-size": "^1.0.3",
-      "rollup-plugin-ts": "^3.0.2",
-      rollup: "^3.15.0",
-      typescript: "^4.7.4",
-      "vega-lite-dev-config": "^0.21.0",
-      "vega-lite": "^5.0.0",
-      vega: "^5.19.1"
+      "rollup-plugin-ts": "^3.2.0",
+      typescript: "^5.1.6",
+      vega: "^5.25.0",
+      "vega-lite": "^5.9.3"
     };
     var peerDependencies$1 = {
       vega: "*",
@@ -3622,9 +3716,10 @@
      * license that can be found in the LICENSE file or at
      * https://developers.google.com/open-source/licenses/bsd
      */
+
     const markColor = '#3366CC';
     const gridColor = '#ccc';
-    const defaultFont = 'Arial, sans-serif';
+    const defaultFont$1 = 'Arial, sans-serif';
     const googlechartsTheme = {
       arc: {
         fill: markColor
@@ -3656,20 +3751,20 @@
       },
       style: {
         'guide-label': {
-          font: defaultFont,
+          font: defaultFont$1,
           fontSize: 12
         },
         'guide-title': {
-          font: defaultFont,
+          font: defaultFont$1,
           fontSize: 12
         },
         'group-title': {
-          font: defaultFont,
+          font: defaultFont$1,
           fontSize: 12
         }
       },
       title: {
-        font: defaultFont,
+        font: defaultFont$1,
         fontSize: 14,
         fontWeight: 'bold',
         dy: -3,
@@ -3807,10 +3902,107 @@
         ordinal: ordinalPalette
       }
     };
+    const defaultFont = 'IBM Plex Sans,system-ui,-apple-system,BlinkMacSystemFont,".sfnstext-regular",sans-serif';
+    const fontWeight = 400;
+    const darkCategories = ['#8a3ffc', '#33b1ff', '#007d79', '#ff7eb6', '#fa4d56', '#fff1f1', '#6fdc8c', '#4589ff', '#d12771', '#d2a106', '#08bdba', '#bae6ff', '#ba4e00', '#d4bbff'];
+    const lightCategories = ['#6929c4', '#1192e8', '#005d5d', '#9f1853', '#fa4d56', '#570408', '#198038', '#002d9c', '#ee538b', '#b28600', '#009d9a', '#012749', '#8a3800', '#a56eff'];
+    function genCarbonConfig({
+      type,
+      background
+    }) {
+      const viewbg = type === 'dark' ? '#161616' : '#ffffff';
+      const textColor = type === 'dark' ? '#f4f4f4' : '#161616';
+      const category = type === 'dark' ? darkCategories : lightCategories;
+      const markColor = type === 'dark' ? '#d4bbff' : '#6929c4';
+      return {
+        background,
+        arc: {
+          fill: markColor
+        },
+        area: {
+          fill: markColor
+        },
+        path: {
+          stroke: markColor
+        },
+        rect: {
+          fill: markColor
+        },
+        shape: {
+          stroke: markColor
+        },
+        symbol: {
+          stroke: markColor
+        },
+        circle: {
+          fill: markColor
+        },
+        view: {
+          fill: viewbg,
+          stroke: viewbg
+        },
+        group: {
+          fill: viewbg
+        },
+        title: {
+          color: textColor,
+          anchor: 'start',
+          dy: -15,
+          fontSize: 16,
+          font: defaultFont,
+          fontWeight: 600
+        },
+        axis: {
+          labelColor: textColor,
+          labelFontSize: 12,
+          grid: true,
+          gridColor: '#525252',
+          titleColor: textColor,
+          labelAngle: 0
+        },
+        style: {
+          'guide-label': {
+            font: defaultFont,
+            fill: textColor,
+            fontWeight: fontWeight
+          },
+          'guide-title': {
+            font: defaultFont,
+            fill: textColor,
+            fontWeight: fontWeight
+          }
+        },
+        range: {
+          category,
+          diverging: ['#750e13', '#a2191f', '#da1e28', '#fa4d56', '#ff8389', '#ffb3b8', '#ffd7d9', '#fff1f1', '#e5f6ff', '#bae6ff', '#82cfff', '#33b1ff', '#1192e8', '#0072c3', '#00539a', '#003a6d'],
+          heatmap: ['#f6f2ff', '#e8daff', '#d4bbff', '#be95ff', '#a56eff', '#8a3ffc', '#6929c4', '#491d8b', '#31135e', '#1c0f30']
+        }
+      };
+    }
+    const carbonwhite = genCarbonConfig({
+      type: 'light',
+      background: '#ffffff'
+    });
+    const carbong10 = genCarbonConfig({
+      type: 'light',
+      background: '#f4f4f4'
+    });
+    const carbong90 = genCarbonConfig({
+      type: 'dark',
+      background: '#262626'
+    });
+    const carbong100 = genCarbonConfig({
+      type: 'dark',
+      background: '#161616'
+    });
     const version$2 = pkg$1.version;
 
     var themes = /*#__PURE__*/Object.freeze({
         __proto__: null,
+        carbong10: carbong10,
+        carbong100: carbong100,
+        carbong90: carbong90,
+        carbonwhite: carbonwhite,
         dark: darkTheme,
         excel: excelTheme,
         fivethirtyeight: fiveThirtyEightTheme,
@@ -3865,8 +4057,7 @@
       for (i = j = 0; j < n; ++j) {
         c = p[j];
         if (c === '\\') {
-          s += p.substring(i, j);
-          s += p.substring(++j, ++j);
+          s += p.substring(i, j++);
           i = j;
         } else if (c === q) {
           push();
@@ -3923,29 +4114,71 @@
       return typeof _ === 'string';
     }
 
-    /******************************************************************************
-    Copyright (c) Microsoft Corporation.
+    function _typeof(obj) {
+      "@babel/helpers - typeof";
 
-    Permission to use, copy, modify, and/or distribute this software for any
-    purpose with or without fee is hereby granted.
-
-    THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
-    REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
-    AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
-    INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
-    LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
-    OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
-    PERFORMANCE OF THIS SOFTWARE.
-    ***************************************************************************** */
-
-    function __rest(s, e) {
-      var t = {};
-      for (var p in s) if (Object.prototype.hasOwnProperty.call(s, p) && e.indexOf(p) < 0) t[p] = s[p];
-      if (s != null && typeof Object.getOwnPropertySymbols === "function") for (var i = 0, p = Object.getOwnPropertySymbols(s); i < p.length; i++) {
-        if (e.indexOf(p[i]) < 0 && Object.prototype.propertyIsEnumerable.call(s, p[i])) t[p[i]] = s[p[i]];
-      }
-      return t;
+      return _typeof = "function" == typeof Symbol && "symbol" == typeof Symbol.iterator ? function (obj) {
+        return typeof obj;
+      } : function (obj) {
+        return obj && "function" == typeof Symbol && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj;
+      }, _typeof(obj);
     }
+    function _toPrimitive(input, hint) {
+      if (_typeof(input) !== "object" || input === null) return input;
+      var prim = input[Symbol.toPrimitive];
+      if (prim !== undefined) {
+        var res = prim.call(input, hint || "default");
+        if (_typeof(res) !== "object") return res;
+        throw new TypeError("@@toPrimitive must return a primitive value.");
+      }
+      return (hint === "string" ? String : Number)(input);
+    }
+    function _toPropertyKey(arg) {
+      var key = _toPrimitive(arg, "string");
+      return _typeof(key) === "symbol" ? key : String(key);
+    }
+    function _defineProperty(obj, key, value) {
+      key = _toPropertyKey(key);
+      if (key in obj) {
+        Object.defineProperty(obj, key, {
+          value: value,
+          enumerable: true,
+          configurable: true,
+          writable: true
+        });
+      } else {
+        obj[key] = value;
+      }
+      return obj;
+    }
+    function _objectWithoutPropertiesLoose(source, excluded) {
+      if (source == null) return {};
+      var target = {};
+      var sourceKeys = Object.keys(source);
+      var key, i;
+      for (i = 0; i < sourceKeys.length; i++) {
+        key = sourceKeys[i];
+        if (excluded.indexOf(key) >= 0) continue;
+        target[key] = source[key];
+      }
+      return target;
+    }
+    function _objectWithoutProperties(source, excluded) {
+      if (source == null) return {};
+      var target = _objectWithoutPropertiesLoose(source, excluded);
+      var key, i;
+      if (Object.getOwnPropertySymbols) {
+        var sourceSymbolKeys = Object.getOwnPropertySymbols(source);
+        for (i = 0; i < sourceSymbolKeys.length; i++) {
+          key = sourceSymbolKeys[i];
+          if (excluded.indexOf(key) >= 0) continue;
+          if (!Object.prototype.propertyIsEnumerable.call(source, key)) continue;
+          target[key] = source[key];
+        }
+      }
+      return target;
+    }
+    const _excluded = ["title", "image"];
 
     /**
      * Format the value to be shown in the tooltip.
@@ -3959,12 +4192,12 @@
       }
       if (isObject(value)) {
         let content = '';
-        const _a = value,
+        const _ref = value,
           {
             title,
             image
-          } = _a,
-          rest = __rest(_a, ["title", "image"]);
+          } = _ref,
+          rest = _objectWithoutProperties(_ref, _excluded);
         if (title) {
           content += `<h2>${valueToHtml(title)}</h2>`;
         }
@@ -3976,6 +4209,7 @@
           content += '<table>';
           for (const key of keys) {
             let val = rest[key];
+
             // ignore undefined properties
             if (val === undefined) {
               continue;
@@ -4010,6 +4244,7 @@
         return value;
       };
     }
+
     /**
      * Stringify any JS object to valid JSON
      */
@@ -4039,10 +4274,6 @@
   margin-top: 0;
   margin-bottom: 10px;
   font-size: 13px;
-}
-#vg-tooltip-element img {
-  max-width: 200px;
-  max-height: 200px;
 }
 #vg-tooltip-element table {
   border-spacing: 0;
@@ -4161,22 +4392,57 @@
         y
       };
     }
+    function ownKeys(object, enumerableOnly) {
+      var keys = Object.keys(object);
+      if (Object.getOwnPropertySymbols) {
+        var symbols = Object.getOwnPropertySymbols(object);
+        enumerableOnly && (symbols = symbols.filter(function (sym) {
+          return Object.getOwnPropertyDescriptor(object, sym).enumerable;
+        })), keys.push.apply(keys, symbols);
+      }
+      return keys;
+    }
+    function _objectSpread(target) {
+      for (var i = 1; i < arguments.length; i++) {
+        var source = null != arguments[i] ? arguments[i] : {};
+        i % 2 ? ownKeys(Object(source), !0).forEach(function (key) {
+          _defineProperty(target, key, source[key]);
+        }) : Object.getOwnPropertyDescriptors ? Object.defineProperties(target, Object.getOwnPropertyDescriptors(source)) : ownKeys(Object(source)).forEach(function (key) {
+          Object.defineProperty(target, key, Object.getOwnPropertyDescriptor(source, key));
+        });
+      }
+      return target;
+    }
 
     /**
      * The tooltip handler class.
      */
     class Handler {
       /**
+       * The handler function. We bind this to this function in the constructor.
+       */
+
+      /**
+       * Complete tooltip options.
+       */
+
+      /**
+       * The tooltip html element.
+       */
+
+      /**
        * Create the tooltip handler and initialize the element and style.
        *
        * @param options Tooltip Options
        */
       constructor(options) {
-        this.options = Object.assign(Object.assign({}, DEFAULT_OPTIONS), options);
+        this.options = _objectSpread(_objectSpread({}, DEFAULT_OPTIONS), options);
         const elementId = this.options.id;
         this.el = null;
+
         // bind this to call
         this.call = this.tooltipHandler.bind(this);
+
         // prepend a default stylesheet for tooltips to the head
         if (!this.options.disableDefaultStyle && !document.getElementById(this.options.styleId)) {
           const style = document.createElement('style');
@@ -4190,28 +4456,32 @@
           }
         }
       }
+
       /**
        * The tooltip handler function.
        */
       tooltipHandler(handler, event, item, value) {
         // console.log(handler, event, item, value);
-        var _a;
+
         // append a div element that we use as a tooltip unless it already exists
         this.el = document.getElementById(this.options.id);
         if (!this.el) {
           this.el = document.createElement('div');
           this.el.setAttribute('id', this.options.id);
           this.el.classList.add('vg-tooltip');
-          const tooltipContainer = (_a = document.fullscreenElement) !== null && _a !== void 0 ? _a : document.body;
+          const tooltipContainer = document.fullscreenElement ?? document.body;
           tooltipContainer.appendChild(this.el);
         }
+
         // hide tooltip for null, undefined, or empty string values
         if (value == null || value === '') {
           this.el.classList.remove('visible', `${this.options.theme}-theme`);
           return;
         }
+
         // set the tooltip content
         this.el.innerHTML = this.options.formatTooltip(value, this.options.sanitize, this.options.maxDepth);
+
         // make the tooltip visible
         this.el.classList.add('visible', `${this.options.theme}-theme`);
         const {
@@ -4378,20 +4648,10 @@
 }
 `;
 
-    // polyfill for IE
-    if (!String.prototype.startsWith) {
-      // eslint-disable-next-line no-extend-native,func-names
-      String.prototype.startsWith = function (search, pos) {
-        return this.substr(!pos || pos < 0 ? 0 : +pos, search.length) === search;
-      };
-    }
     function isURL(s) {
       return s.startsWith('http://') || s.startsWith('https://') || s.startsWith('//');
     }
-    function mergeDeep(dest) {
-      for (var _len = arguments.length, src = new Array(_len > 1 ? _len - 1 : 0), _key = 1; _key < _len; _key++) {
-        src[_key - 1] = arguments[_key];
-      }
+    function mergeDeep(dest, ...src) {
       for (const s of src) {
         deepMerge_(dest, s);
       }
@@ -4404,7 +4664,7 @@
     }
 
     var name = "vega-embed";
-    var version$1 = "6.21.3";
+    var version$1 = "6.23.0";
     var description = "Publish Vega visualizations as embedded web components.";
     var keywords = ["vega", "data", "visualization", "component", "embed"];
     var repository = {
@@ -4429,31 +4689,45 @@
     var unpkg = "build/vega-embed.min.js";
     var jsdelivr = "build/vega-embed.min.js";
     var types = "build/vega-embed.module.d.ts";
-    var files = ["src", "build", "build-es5", "patches"];
+    var files = ["src", "build", "patches"];
     var devDependencies = {
-      "@babel/plugin-transform-runtime": "^7.19.6",
-      "@release-it/conventional-changelog": "^5.1.1",
-      "@rollup/plugin-commonjs": "24.0.1",
+      "@babel/core": "^7.22.9",
+      "@babel/plugin-proposal-async-generator-functions": "^7.20.7",
+      "@babel/plugin-proposal-json-strings": "^7.18.6",
+      "@babel/plugin-proposal-object-rest-spread": "^7.20.7",
+      "@babel/plugin-proposal-optional-catch-binding": "^7.18.6",
+      "@babel/plugin-transform-runtime": "^7.22.9",
+      "@babel/preset-env": "^7.22.9",
+      "@babel/preset-typescript": "^7.22.5",
+      "@release-it/conventional-changelog": "^7.0.0",
+      "@rollup/plugin-commonjs": "25.0.4",
       "@rollup/plugin-json": "^6.0.0",
-      "@rollup/plugin-node-resolve": "^15.0.1",
-      "@rollup/plugin-terser": "^0.4.0",
-      "@types/semver": "^7.3.13",
-      "browser-sync": "^2.27.11",
-      concurrently: "^7.6.0",
+      "@rollup/plugin-node-resolve": "^15.1.0",
+      "@rollup/plugin-terser": "^0.4.3",
+      "@types/semver": "^7.5.0",
+      "@typescript-eslint/eslint-plugin": "^6.2.0",
+      "@typescript-eslint/parser": "^6.2.0",
+      "browser-sync": "^2.29.3",
+      concurrently: "^8.2.0",
       "del-cli": "^5.0.0",
-      "jest-canvas-mock": "^2.4.0",
-      "jest-environment-jsdom": "^29.4.3",
-      "patch-package": "^6.5.1",
+      eslint: "^8.46.0",
+      "eslint-config-prettier": "^9.0.0",
+      "eslint-plugin-jest": "^27.2.3",
+      "eslint-plugin-prettier": "^5.0.0",
+      jest: "^29.6.2",
+      "jest-canvas-mock": "^2.5.2",
+      "jest-environment-jsdom": "^29.6.2",
+      "patch-package": "^8.0.0",
       "postinstall-postinstall": "^2.1.0",
-      "release-it": "^15.6.0",
+      prettier: "^3.0.0",
+      "release-it": "^16.1.3",
+      rollup: "3.29.1",
       "rollup-plugin-bundle-size": "^1.0.3",
       "rollup-plugin-ts": "^3.2.0",
-      rollup: "3.15.0",
-      sass: "^1.58.1",
-      typescript: "^4.9.5",
-      "vega-lite-dev-config": "^0.21.0",
-      "vega-lite": "^5.2.0",
-      vega: "^5.22.1"
+      sass: "^1.64.1",
+      typescript: "^5.1.6",
+      vega: "^5.22.1",
+      "vega-lite": "^5.2.0"
     };
     var peerDependencies = {
       vega: "^5.21.0",
@@ -4462,31 +4736,29 @@
     var dependencies = {
       "fast-json-patch": "^3.1.1",
       "json-stringify-pretty-compact": "^3.0.0",
-      semver: "^7.3.8",
-      tslib: "^2.5.0",
-      "vega-interpreter": "^1.0.4",
+      semver: "^7.5.4",
+      tslib: "^2.6.1",
+      "vega-interpreter": "^1.0.5",
       "vega-schema-url-parser": "^2.2.0",
-      "vega-themes": "^2.12.1",
-      "vega-tooltip": "^0.30.1"
+      "vega-themes": "^2.14.0",
+      "vega-tooltip": "^0.33.0"
     };
     var bundledDependencies = ["yallist"];
     var scripts = {
       prebuild: "yarn clean && yarn build:style",
       build: "rollup -c",
       "build:style": "./build-style.sh",
-      clean: "del-cli build build-es5 src/style.ts",
+      clean: "del-cli build src/style.ts",
       prepublishOnly: "yarn clean && yarn build",
       preversion: "yarn lint && yarn test",
       serve: "browser-sync start --directory -s -f build *.html",
       start: "yarn build && concurrently --kill-others -n Server,Rollup 'yarn serve' 'rollup -c -w'",
       pretest: "yarn build:style",
-      test: "beemo jest --stdio stream",
+      test: "jest",
       "test:inspect": "node --inspect-brk ./node_modules/.bin/jest --runInBand",
-      prepare: "beemo create-config && npx patch-package",
-      prettierbase: "beemo prettier '*.{css,scss,html}'",
-      eslintbase: "beemo eslint .",
-      format: "yarn eslintbase --fix && yarn prettierbase --write",
-      lint: "yarn eslintbase && yarn prettierbase --check",
+      prettierbase: "prettier '*.{css,scss,html}'",
+      format: "eslint . --fix && yarn prettierbase --write",
+      lint: "eslint . && yarn prettierbase --check",
       release: "release-it"
     };
     var pkg = {
@@ -4513,14 +4785,13 @@
       scripts: scripts
     };
 
-    var _w$vl;
     const version = pkg.version;
     const vega = vegaImport__namespace;
     let vegaLite = vegaLiteImport__namespace;
 
     // For backwards compatibility with Vega-Lite before v4.
     const w = typeof window !== 'undefined' ? window : undefined;
-    if (vegaLite === undefined && w !== null && w !== void 0 && (_w$vl = w.vl) !== null && _w$vl !== void 0 && _w$vl.compile) {
+    if (vegaLite === undefined && w?.vl?.compile) {
       vegaLite = w.vl;
     }
     const DEFAULT_ACTIONS = {
@@ -4586,7 +4857,7 @@
           console.warn(`The given visualization spec is written in ${NAMES[parsed.library]}, but mode argument sets ${NAMES[providedMode] ?? providedMode}.`);
         }
         const mode = parsed.library;
-        if (!satisfies_1(VERSION[mode], `^${parsed.version.slice(1)}`)) {
+        if (!satisfies$1(VERSION[mode], `^${parsed.version.slice(1)}`)) {
           console.warn(`The input spec uses ${NAMES[mode]} ${parsed.version}, but the current version of ${NAMES[mode]} is v${VERSION[mode]}.`);
         }
         return mode;
@@ -4608,8 +4879,7 @@
       return isLoader(opts) ? opts : vega.loader(opts);
     }
     function embedOptionsFromUsermeta(parsedSpec) {
-      var _parsedSpec$usermeta;
-      const opts = ((_parsedSpec$usermeta = parsedSpec.usermeta) === null || _parsedSpec$usermeta === void 0 ? void 0 : _parsedSpec$usermeta.embedOptions) ?? {};
+      const opts = parsedSpec.usermeta?.embedOptions ?? {};
       if (vegaImport.isString(opts.defaultStyle)) {
         // we don't allow styles set via usermeta since it would allow injection of logic (we set the style via innerHTML)
         opts.defaultStyle = false;
@@ -4625,8 +4895,7 @@
      *                  Object : The Vega/Vega-Lite specification as a parsed JSON object.
      * @param opts       A JavaScript object containing options for embedding.
      */
-    async function embed(el, spec) {
-      let opts = arguments.length > 2 && arguments[2] !== undefined ? arguments[2] : {};
+    async function embed(el, spec, opts = {}) {
       let parsedSpec;
       let loader;
       if (vegaImport.isString(spec)) {
@@ -4673,9 +4942,7 @@
         rootContainer: document.head ?? document.body
       };
     }
-    async function _embed(el, spec) {
-      let opts = arguments.length > 2 && arguments[2] !== undefined ? arguments[2] : {};
-      let loader = arguments.length > 3 ? arguments[3] : undefined;
+    async function _embed(el, spec, opts = {}, loader) {
       const config = opts.theme ? vegaImport.mergeConfig(themes[opts.theme], opts.config ?? {}) : opts.config;
       const actions = vegaImport.isBoolean(opts.actions) ? opts.actions : mergeDeep({}, DEFAULT_ACTIONS, opts.actions ?? {});
       const i18n = {
@@ -4707,7 +4974,7 @@
       if (mode === 'vega-lite') {
         if (vgSpec.$schema) {
           const parsed = e(vgSpec.$schema);
-          if (!satisfies_1(VERSION.vega, `^${parsed.version.slice(1)}`)) {
+          if (!satisfies$1(VERSION.vega, `^${parsed.version.slice(1)}`)) {
             console.warn(`The compiled spec uses Vega ${parsed.version}, but current version is v${VERSION.vega}.`);
           }
         }
@@ -4816,7 +5083,7 @@
       let documentClickHandler;
       if (actions !== false) {
         let wrapper = element;
-        if (opts.defaultStyle !== false) {
+        if (opts.defaultStyle !== false || opts.forceActionsMenu) {
           const details = document.createElement('details');
           details.title = i18n.CLICK_TO_VIEW_ACTIONS;
           element.append(details);
@@ -4863,7 +5130,7 @@
           viewSourceLink.text = i18n.SOURCE_ACTION;
           viewSourceLink.href = '#';
           viewSourceLink.addEventListener('click', function (e) {
-            viewSource(jsonStringifyPrettyCompact(spec), opts.sourceHeader ?? '', opts.sourceFooter ?? '', mode);
+            viewSource(stringify$1(spec), opts.sourceHeader ?? '', opts.sourceFooter ?? '', mode);
             e.preventDefault();
           });
           ctrl.append(viewSourceLink);
@@ -4875,7 +5142,7 @@
           compileLink.text = i18n.COMPILED_ACTION;
           compileLink.href = '#';
           compileLink.addEventListener('click', function (e) {
-            viewSource(jsonStringifyPrettyCompact(vgSpec), opts.sourceHeader ?? '', opts.sourceFooter ?? '', 'vega');
+            viewSource(stringify$1(vgSpec), opts.sourceHeader ?? '', opts.sourceFooter ?? '', 'vega');
             e.preventDefault();
           });
           ctrl.append(compileLink);
@@ -4892,7 +5159,7 @@
               config: config,
               mode,
               renderer,
-              spec: jsonStringifyPrettyCompact(spec)
+              spec: stringify$1(spec)
             });
             e.preventDefault();
           });
@@ -4920,8 +5187,7 @@
      *
      * The main use case is in [Observable](https://observablehq.com/).
      */
-    async function container (spec) {
-      let opt = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : {};
+    async function container (spec, opt = {}) {
       const wrapper = document.createElement('div');
       wrapper.classList.add('vega-embed-wrapper');
       const div = document.createElement('div');
@@ -4947,11 +5213,11 @@
     function isElement(obj) {
       return obj instanceof HTMLElement;
     }
-    const wrapper = function () {
-      if (arguments.length > 1 && (vegaImport.isString(arguments.length <= 0 ? undefined : arguments[0]) && !isURL(arguments.length <= 0 ? undefined : arguments[0]) || isElement(arguments.length <= 0 ? undefined : arguments[0]) || arguments.length === 3)) {
-        return embed(arguments.length <= 0 ? undefined : arguments[0], arguments.length <= 1 ? undefined : arguments[1], arguments.length <= 2 ? undefined : arguments[2]);
+    const wrapper = (...args) => {
+      if (args.length > 1 && (vegaImport.isString(args[0]) && !isURL(args[0]) || isElement(args[0]) || args.length === 3)) {
+        return embed(args[0], args[1], args[2]);
       }
-      return container(arguments.length <= 0 ? undefined : arguments[0], arguments.length <= 1 ? undefined : arguments[1]);
+      return container(args[0], args[1]);
     };
     wrapper.vegaLite = vegaLite;
     wrapper.vl = vegaLite; // backwards compatibility
